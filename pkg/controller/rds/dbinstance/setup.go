@@ -8,11 +8,15 @@ import (
 	"strings"
 	"time"
 
+	. "github.com/crossplane-contrib/provider-aws/pkg/controller/rds"
+	. "github.com/crossplane-contrib/provider-aws/pkg/generics"
+
 	svcsdk "github.com/aws/aws-sdk-go/service/rds"
 	svcsdkapi "github.com/aws/aws-sdk-go/service/rds/rdsiface"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/pkg/errors"
+	perrors "github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -36,7 +40,14 @@ import (
 
 // error constants
 const (
-	errSaveSecretFailed = "failed to save generated password to Kubernetes secret"
+	errSaveSecretFailed                   = "failed to save generated password to Kubernetes secret"
+	errRestore                            = "cannot restore DBInstance in AWS"
+	errS3RestoreFailed                    = "cannot restore DBInstance from S3 backup"
+	errSnapshotRestoreFailed              = "cannot restore DBInstance from snapshot"
+	errPointInTimeRestoreFailed           = "cannot restore DBInstance from point in time"
+	errPointInTimeRestoreSourceNotDefined = "sourceDBInstanceAutomatedBackupsArn, sourceDBInstanceIdentifier or sourceDbiResourceId must be defined"
+	errUnknownRestoreSource               = "unknown DBInstance restore source"
+	errUnknownRestoreFromSource           = "unknown restoreFrom source"
 )
 
 // time formats
@@ -120,6 +131,14 @@ func (e *custom) preCreate(ctx context.Context, cr *svcapitypes.DBInstance, obj 
 			obj.DBSecurityGroups[i] = aws.String(v)
 		}
 	}
+
+	if cr.Spec.ForProvider.RestoreFrom == nil {
+		return nil
+	}
+	if err := RestoreDBInstance(ctx, e.client, cr, obj); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -460,4 +479,72 @@ func handleKmsKey(inKey *string, dbKey *string) *string {
 		return &keyID
 	}
 	return dbKey
+}
+
+func RestoreDBInstance(ctx context.Context, client svcsdkapi.RDSAPI, cr *svcapitypes.DBInstance, obj *svcsdk.CreateDBInstanceInput) error { // nolint:gocyclo
+
+	if cr.Spec.ForProvider.RestoreFrom == nil {
+		return errors.New(errUnknownRestoreSource)
+	}
+	if cr.Spec.ForProvider.RestoreFrom.Source == nil {
+		return errors.New(errUnknownRestoreSource)
+	}
+	switch *cr.Spec.ForProvider.RestoreFrom.Source {
+	case "S3":
+		if cr.Spec.ForProvider.RestoreFrom.S3 == nil {
+			return errors.New(errUnknownRestoreSource)
+		}
+		res := &svcsdk.RestoreDBInstanceFromS3Input{}
+		SetFieldsForInstance(cr, obj, res)
+
+		// set s3 specific inputs
+		SetIfNonNil(res.SetS3BucketName, cr.Spec.ForProvider.RestoreFrom.S3.BucketName)
+		SetIfNonNil(res.SetS3IngestionRoleArn, cr.Spec.ForProvider.RestoreFrom.S3.IngestionRoleARN)
+		SetIfNonNil(res.SetS3Prefix, cr.Spec.ForProvider.RestoreFrom.S3.Prefix)
+		SetIfNonNil(res.SetSourceEngine, cr.Spec.ForProvider.RestoreFrom.S3.SourceEngine)
+		SetIfNonNil(res.SetSourceEngineVersion, cr.Spec.ForProvider.RestoreFrom.S3.SourceEngineVersion)
+
+		if _, err := client.RestoreDBInstanceFromS3WithContext(ctx, res); err != nil {
+			return perrors.Wrap(err, errRestore)
+		}
+		return nil
+	case "Snapshot":
+		if cr.Spec.ForProvider.RestoreFrom.Snapshot == nil {
+			return errors.New(errUnknownRestoreSource)
+		}
+		res := &svcsdk.RestoreDBInstanceFromDBSnapshotInput{}
+		SetFieldsForInstance(cr, obj, res)
+
+		// set snapshot specific inputs
+		SetIfNonNil(res.SetDBSnapshotIdentifier, cr.Spec.ForProvider.RestoreFrom.Snapshot.SnapshotIdentifier)
+
+		if _, err := client.RestoreDBInstanceFromDBSnapshotWithContext(ctx, res); err != nil {
+			return perrors.Wrap(err, errRestore)
+		}
+		return nil
+	case "PointInTime":
+		if cr.Spec.ForProvider.RestoreFrom.Snapshot == nil {
+			return errors.New(errUnknownRestoreSource)
+		}
+
+		res := &svcsdk.RestoreDBInstanceToPointInTimeInput{}
+		SetFieldsForInstance(cr, obj, res)
+
+		// set pointintime specific inputs
+		SetIfNonNil(func(i metav1.Time) *svcsdk.RestoreDBInstanceToPointInTimeInput {
+			// Need to convert from *metav1.Time to *time.Time
+			t, _ := time.Parse(time.RFC3339, i.Format(time.RFC3339))
+			return res.SetRestoreTime(t)
+
+		}, cr.Spec.ForProvider.RestoreFrom.PointInTime.RestoreTime)
+
+		//SetIfNonNil(res.SetEngineMode, cr.Spec.ForProvider.EngineMode)
+
+		if _, err := client.RestoreDBInstanceToPointInTimeWithContext(ctx, res); err != nil {
+			return perrors.Wrap(err, errRestore)
+		}
+		return nil
+	}
+
+	return errors.New(errUnknownRestoreFromSource)
 }

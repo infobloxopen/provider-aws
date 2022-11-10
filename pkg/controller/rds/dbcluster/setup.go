@@ -4,10 +4,15 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"time"
+
+	. "github.com/crossplane-contrib/provider-aws/pkg/controller/rds"
+	. "github.com/crossplane-contrib/provider-aws/pkg/generics"
 
 	svcsdk "github.com/aws/aws-sdk-go/service/rds"
 	svcsdkapi "github.com/aws/aws-sdk-go/service/rds/rdsiface"
 	"github.com/pkg/errors"
+	perrors "github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -34,10 +39,15 @@ import (
 
 // error constants
 const (
-	errSaveSecretFailed         = "failed to save generated password to Kubernetes secret"
-	errUpdateTags               = "cannot update tags"
-	errRestore                  = "cannot restore DBCluster in AWS"
-	errUnknownRestoreFromSource = "unknown restoreFrom source"
+	errSaveSecretFailed                   = "failed to save generated password to Kubernetes secret"
+	errUpdateTags                         = "cannot update tags"
+	errRestore                            = "cannot restore DBCluster in AWS"
+	errS3RestoreFailed                    = "cannot restore DBCluster from S3 backup"
+	errSnapshotRestoreFailed              = "cannot restore DBCluster from snapshot"
+	errPointInTimeRestoreFailed           = "cannot restore DBCluster from point in time"
+	errPointInTimeRestoreSourceNotDefined = "sourceDBInstanceAutomatedBackupsArn, sourceDBInstanceIdentifier or sourceDbiResourceId must be defined"
+	errUnknownRestoreSource               = "unknown DBCluster restore source"
+	errUnknownRestoreFromSource           = "unknown restoreFrom source"
 )
 
 type updater struct {
@@ -142,300 +152,14 @@ func (e *custom) preCreate(ctx context.Context, cr *svcapitypes.DBCluster, obj *
 		obj.VpcSecurityGroupIds[i] = aws.String(v)
 	}
 
-	if cr.Spec.ForProvider.RestoreFrom != nil {
-		switch *cr.Spec.ForProvider.RestoreFrom.Source {
-		case "S3":
-			input := generateRestoreDBClusterFromS3Input(cr)
-			input.MasterUserPassword = obj.MasterUserPassword
-			input.DBClusterIdentifier = obj.DBClusterIdentifier
-			input.VpcSecurityGroupIds = obj.VpcSecurityGroupIds
-
-			if _, err = e.client.RestoreDBClusterFromS3WithContext(ctx, input); err != nil {
-				return errors.Wrap(err, errRestore)
-			}
-		case "Snapshot":
-			input := generateRestoreDBClusterFromSnapshotInput(cr)
-			input.DBClusterIdentifier = obj.DBClusterIdentifier
-			input.VpcSecurityGroupIds = obj.VpcSecurityGroupIds
-
-			if _, err = e.client.RestoreDBClusterFromSnapshotWithContext(ctx, input); err != nil {
-				return errors.Wrap(err, errRestore)
-			}
-		default:
-			return errors.New(errUnknownRestoreFromSource)
-		}
+	if cr.Spec.ForProvider.RestoreFrom == nil {
+		return nil
+	}
+	if err := RestoreDBCluster(ctx, e.client, cr, obj); err != nil {
+		return err
 	}
 
 	return nil
-}
-
-func generateRestoreDBClusterFromS3Input(cr *svcapitypes.DBCluster) *svcsdk.RestoreDBClusterFromS3Input { // nolint:gocyclo
-	res := &svcsdk.RestoreDBClusterFromS3Input{}
-
-	if cr.Spec.ForProvider.AvailabilityZones != nil {
-		res.SetAvailabilityZones(cr.Spec.ForProvider.AvailabilityZones)
-	}
-
-	if cr.Spec.ForProvider.BacktrackWindow != nil {
-		res.SetBacktrackWindow(*cr.Spec.ForProvider.BacktrackWindow)
-	}
-
-	if cr.Spec.ForProvider.BackupRetentionPeriod != nil {
-		res.SetBackupRetentionPeriod(*cr.Spec.ForProvider.BackupRetentionPeriod)
-	}
-
-	if cr.Spec.ForProvider.CharacterSetName != nil {
-		res.SetCharacterSetName(*cr.Spec.ForProvider.CharacterSetName)
-	}
-
-	if cr.Spec.ForProvider.CopyTagsToSnapshot != nil {
-		res.SetCopyTagsToSnapshot(*cr.Spec.ForProvider.CopyTagsToSnapshot)
-	}
-
-	if cr.Spec.ForProvider.DBClusterParameterGroupName != nil {
-		res.SetDBClusterParameterGroupName(*cr.Spec.ForProvider.DBClusterParameterGroupName)
-	}
-
-	if cr.Spec.ForProvider.DBSubnetGroupName != nil {
-		res.SetDBSubnetGroupName(*cr.Spec.ForProvider.DBSubnetGroupName)
-	}
-
-	if cr.Spec.ForProvider.DatabaseName != nil {
-		res.SetDatabaseName(*cr.Spec.ForProvider.DatabaseName)
-	}
-
-	if cr.Spec.ForProvider.DeletionProtection != nil {
-		res.SetDeletionProtection(*cr.Spec.ForProvider.DeletionProtection)
-	}
-
-	if cr.Spec.ForProvider.Domain != nil {
-		res.SetDomain(*cr.Spec.ForProvider.Domain)
-	}
-
-	if cr.Spec.ForProvider.DomainIAMRoleName != nil {
-		res.SetDomainIAMRoleName(*cr.Spec.ForProvider.DomainIAMRoleName)
-	}
-
-	if cr.Spec.ForProvider.EnableCloudwatchLogsExports != nil {
-		res.SetEnableCloudwatchLogsExports(cr.Spec.ForProvider.EnableCloudwatchLogsExports)
-	}
-
-	if cr.Spec.ForProvider.EnableIAMDatabaseAuthentication != nil {
-		res.SetEnableIAMDatabaseAuthentication(*cr.Spec.ForProvider.EnableIAMDatabaseAuthentication)
-	}
-
-	if cr.Spec.ForProvider.Engine != nil {
-		res.SetEngine(*cr.Spec.ForProvider.Engine)
-	}
-
-	if cr.Spec.ForProvider.EngineVersion != nil {
-		res.SetEngineVersion(*cr.Spec.ForProvider.EngineVersion)
-	}
-
-	if cr.Spec.ForProvider.KMSKeyID != nil {
-		res.SetKmsKeyId(*cr.Spec.ForProvider.KMSKeyID)
-	}
-
-	if cr.Spec.ForProvider.MasterUsername != nil {
-		res.SetMasterUsername(*cr.Spec.ForProvider.MasterUsername)
-	}
-
-	if cr.Spec.ForProvider.OptionGroupName != nil {
-		res.SetOptionGroupName(*cr.Spec.ForProvider.OptionGroupName)
-	}
-
-	if cr.Spec.ForProvider.Port != nil {
-		res.SetPort(*cr.Spec.ForProvider.Port)
-	}
-
-	if cr.Spec.ForProvider.PreferredBackupWindow != nil {
-		res.SetPreferredBackupWindow(*cr.Spec.ForProvider.PreferredBackupWindow)
-	}
-
-	if cr.Spec.ForProvider.PreferredMaintenanceWindow != nil {
-		res.SetPreferredMaintenanceWindow(*cr.Spec.ForProvider.PreferredMaintenanceWindow)
-	}
-
-	if cr.Spec.ForProvider.StorageEncrypted != nil {
-		res.SetStorageEncrypted(*cr.Spec.ForProvider.StorageEncrypted)
-	}
-
-	if cr.Spec.ForProvider.RestoreFrom != nil && cr.Spec.ForProvider.RestoreFrom.S3 != nil {
-		if cr.Spec.ForProvider.RestoreFrom.S3.BucketName != nil {
-			res.SetS3BucketName(*cr.Spec.ForProvider.RestoreFrom.S3.BucketName)
-		}
-
-		if cr.Spec.ForProvider.RestoreFrom.S3.IngestionRoleARN != nil {
-			res.SetS3IngestionRoleArn(*cr.Spec.ForProvider.RestoreFrom.S3.IngestionRoleARN)
-		}
-
-		if cr.Spec.ForProvider.RestoreFrom.S3.Prefix != nil {
-			res.SetS3Prefix(*cr.Spec.ForProvider.RestoreFrom.S3.Prefix)
-		}
-
-		if cr.Spec.ForProvider.RestoreFrom.S3.SourceEngine != nil {
-			res.SetSourceEngine(*cr.Spec.ForProvider.RestoreFrom.S3.SourceEngine)
-		}
-
-		if cr.Spec.ForProvider.RestoreFrom.S3.SourceEngineVersion != nil {
-			res.SetSourceEngineVersion(*cr.Spec.ForProvider.RestoreFrom.S3.SourceEngineVersion)
-		}
-	}
-
-	if cr.Spec.ForProvider.ServerlessV2ScalingConfiguration != nil {
-		serverlessScalingConfiguration := &svcsdk.ServerlessV2ScalingConfiguration{}
-		if cr.Spec.ForProvider.ServerlessV2ScalingConfiguration.MaxCapacity != nil {
-			serverlessScalingConfiguration.SetMaxCapacity(*cr.Spec.ForProvider.ServerlessV2ScalingConfiguration.MaxCapacity)
-		}
-		if cr.Spec.ForProvider.ServerlessV2ScalingConfiguration.MinCapacity != nil {
-			serverlessScalingConfiguration.SetMinCapacity(*cr.Spec.ForProvider.ServerlessV2ScalingConfiguration.MinCapacity)
-		}
-		res.SetServerlessV2ScalingConfiguration(serverlessScalingConfiguration)
-	}
-
-	if cr.Spec.ForProvider.Tags != nil {
-		var tags []*svcsdk.Tag
-		for _, tag := range cr.Spec.ForProvider.Tags {
-			tags = append(tags, &svcsdk.Tag{Key: tag.Key, Value: tag.Value})
-		}
-
-		res.SetTags(tags)
-	}
-
-	return res
-}
-
-func generateRestoreDBClusterFromSnapshotInput(cr *svcapitypes.DBCluster) *svcsdk.RestoreDBClusterFromSnapshotInput { // nolint:gocyclo
-	res := &svcsdk.RestoreDBClusterFromSnapshotInput{}
-
-	if cr.Spec.ForProvider.AvailabilityZones != nil {
-		res.SetAvailabilityZones(cr.Spec.ForProvider.AvailabilityZones)
-	}
-
-	if cr.Spec.ForProvider.BacktrackWindow != nil {
-		res.SetBacktrackWindow(*cr.Spec.ForProvider.BacktrackWindow)
-	}
-
-	if cr.Spec.ForProvider.CopyTagsToSnapshot != nil {
-		res.SetCopyTagsToSnapshot(*cr.Spec.ForProvider.CopyTagsToSnapshot)
-	}
-
-	if cr.Spec.ForProvider.DBClusterParameterGroupName != nil {
-		res.SetDBClusterParameterGroupName(*cr.Spec.ForProvider.DBClusterParameterGroupName)
-	}
-
-	if cr.Spec.ForProvider.DBSubnetGroupName != nil {
-		res.SetDBSubnetGroupName(*cr.Spec.ForProvider.DBSubnetGroupName)
-	}
-
-	if cr.Spec.ForProvider.DatabaseName != nil {
-		res.SetDatabaseName(*cr.Spec.ForProvider.DatabaseName)
-	}
-
-	if cr.Spec.ForProvider.DeletionProtection != nil {
-		res.SetDeletionProtection(*cr.Spec.ForProvider.DeletionProtection)
-	}
-
-	if cr.Spec.ForProvider.Domain != nil {
-		res.SetDomain(*cr.Spec.ForProvider.Domain)
-	}
-
-	if cr.Spec.ForProvider.DomainIAMRoleName != nil {
-		res.SetDomainIAMRoleName(*cr.Spec.ForProvider.DomainIAMRoleName)
-	}
-
-	if cr.Spec.ForProvider.EnableCloudwatchLogsExports != nil {
-		res.SetEnableCloudwatchLogsExports(cr.Spec.ForProvider.EnableCloudwatchLogsExports)
-	}
-
-	if cr.Spec.ForProvider.EnableIAMDatabaseAuthentication != nil {
-		res.SetEnableIAMDatabaseAuthentication(*cr.Spec.ForProvider.EnableIAMDatabaseAuthentication)
-	}
-
-	if cr.Spec.ForProvider.Engine != nil {
-		res.SetEngine(*cr.Spec.ForProvider.Engine)
-	}
-
-	if cr.Spec.ForProvider.EngineMode != nil {
-		res.SetEngineMode(*cr.Spec.ForProvider.EngineMode)
-	}
-
-	if cr.Spec.ForProvider.EngineVersion != nil {
-		res.SetEngineVersion(*cr.Spec.ForProvider.EngineVersion)
-	}
-
-	if cr.Spec.ForProvider.IOPS != nil {
-		res.SetIops(*cr.Spec.ForProvider.IOPS)
-	}
-
-	if cr.Spec.ForProvider.KMSKeyID != nil {
-		res.SetKmsKeyId(*cr.Spec.ForProvider.KMSKeyID)
-	}
-
-	if cr.Spec.ForProvider.OptionGroupName != nil {
-		res.SetOptionGroupName(*cr.Spec.ForProvider.OptionGroupName)
-	}
-
-	if cr.Spec.ForProvider.Port != nil {
-		res.SetPort(*cr.Spec.ForProvider.Port)
-	}
-
-	if cr.Spec.ForProvider.PubliclyAccessible != nil {
-		res.SetPubliclyAccessible(*cr.Spec.ForProvider.PubliclyAccessible)
-	}
-
-	if cr.Spec.ForProvider.ScalingConfiguration != nil {
-		scalingConfiguration := &svcsdk.ScalingConfiguration{}
-		if cr.Spec.ForProvider.ScalingConfiguration.AutoPause != nil {
-			scalingConfiguration.SetAutoPause(*cr.Spec.ForProvider.ScalingConfiguration.AutoPause)
-		}
-		if cr.Spec.ForProvider.ScalingConfiguration.MaxCapacity != nil {
-			scalingConfiguration.SetMaxCapacity(*cr.Spec.ForProvider.ScalingConfiguration.MaxCapacity)
-		}
-		if cr.Spec.ForProvider.ScalingConfiguration.MinCapacity != nil {
-			scalingConfiguration.SetMinCapacity(*cr.Spec.ForProvider.ScalingConfiguration.MinCapacity)
-		}
-		if cr.Spec.ForProvider.ScalingConfiguration.SecondsBeforeTimeout != nil {
-			scalingConfiguration.SetSecondsBeforeTimeout(*cr.Spec.ForProvider.ScalingConfiguration.SecondsBeforeTimeout)
-		}
-		if cr.Spec.ForProvider.ScalingConfiguration.SecondsUntilAutoPause != nil {
-			scalingConfiguration.SetSecondsUntilAutoPause(*cr.Spec.ForProvider.ScalingConfiguration.SecondsUntilAutoPause)
-		}
-		if cr.Spec.ForProvider.ScalingConfiguration.TimeoutAction != nil {
-			scalingConfiguration.SetTimeoutAction(*cr.Spec.ForProvider.ScalingConfiguration.TimeoutAction)
-		}
-		res.SetScalingConfiguration(scalingConfiguration)
-	}
-
-	if cr.Spec.ForProvider.ServerlessV2ScalingConfiguration != nil {
-		serverlessScalingConfiguration := &svcsdk.ServerlessV2ScalingConfiguration{}
-		if cr.Spec.ForProvider.ServerlessV2ScalingConfiguration.MaxCapacity != nil {
-			serverlessScalingConfiguration.SetMaxCapacity(*cr.Spec.ForProvider.ServerlessV2ScalingConfiguration.MaxCapacity)
-		}
-		if cr.Spec.ForProvider.ServerlessV2ScalingConfiguration.MinCapacity != nil {
-			serverlessScalingConfiguration.SetMinCapacity(*cr.Spec.ForProvider.ServerlessV2ScalingConfiguration.MinCapacity)
-		}
-		res.SetServerlessV2ScalingConfiguration(serverlessScalingConfiguration)
-	}
-
-	if cr.Spec.ForProvider.RestoreFrom != nil && cr.Spec.ForProvider.RestoreFrom.Snapshot != nil {
-		res.SetSnapshotIdentifier(*cr.Spec.ForProvider.RestoreFrom.Snapshot.SnapshotIdentifier)
-	}
-
-	if cr.Spec.ForProvider.StorageType != nil {
-		res.SetStorageType(*cr.Spec.ForProvider.StorageType)
-	}
-
-	if cr.Spec.ForProvider.Tags != nil {
-		var tags []*svcsdk.Tag
-		for _, tag := range cr.Spec.ForProvider.Tags {
-			tags = append(tags, &svcsdk.Tag{Key: tag.Key, Value: tag.Value})
-		}
-
-		res.SetTags(tags)
-	}
-
-	return res
 }
 
 func isUpToDate(cr *svcapitypes.DBCluster, out *svcsdk.DescribeDBClustersOutput) (bool, error) { // nolint:gocyclo
@@ -696,4 +420,72 @@ func (u *updater) updateTags(ctx context.Context, cr *svcapitypes.DBCluster, add
 	}
 	return nil
 
+}
+
+func RestoreDBCluster(ctx context.Context, client svcsdkapi.RDSAPI, cr *svcapitypes.DBCluster, obj *svcsdk.CreateDBClusterInput) error { // nolint:gocyclo
+
+	if cr.Spec.ForProvider.RestoreFrom == nil {
+		return errors.New(errUnknownRestoreSource)
+	}
+	if cr.Spec.ForProvider.RestoreFrom.Source == nil {
+		return errors.New(errUnknownRestoreSource)
+	}
+	switch *cr.Spec.ForProvider.RestoreFrom.Source {
+	case "S3":
+		if cr.Spec.ForProvider.RestoreFrom.S3 == nil {
+			return errors.New(errUnknownRestoreSource)
+		}
+		res := &svcsdk.RestoreDBClusterFromS3Input{}
+		SetFieldsForCluster(cr, obj, res)
+
+		// set s3 specific inputs
+		SetIfNonNil(res.SetS3BucketName, cr.Spec.ForProvider.RestoreFrom.S3.BucketName)
+		SetIfNonNil(res.SetS3IngestionRoleArn, cr.Spec.ForProvider.RestoreFrom.S3.IngestionRoleARN)
+		SetIfNonNil(res.SetS3Prefix, cr.Spec.ForProvider.RestoreFrom.S3.Prefix)
+		SetIfNonNil(res.SetSourceEngine, cr.Spec.ForProvider.RestoreFrom.S3.SourceEngine)
+		SetIfNonNil(res.SetSourceEngineVersion, cr.Spec.ForProvider.RestoreFrom.S3.SourceEngineVersion)
+
+		if _, err := client.RestoreDBClusterFromS3WithContext(ctx, res); err != nil {
+			return perrors.Wrap(err, errRestore)
+		}
+		return nil
+	case "Snapshot":
+		if cr.Spec.ForProvider.RestoreFrom.Snapshot == nil {
+			return errors.New(errUnknownRestoreSource)
+		}
+		res := &svcsdk.RestoreDBClusterFromSnapshotInput{}
+		SetFieldsForCluster(cr, obj, res)
+
+		// set snapshot specific inputs
+		SetIfNonNil(res.SetSnapshotIdentifier, cr.Spec.ForProvider.RestoreFrom.Snapshot.SnapshotIdentifier)
+
+		if _, err := client.RestoreDBClusterFromSnapshotWithContext(ctx, res); err != nil {
+			return perrors.Wrap(err, errRestore)
+		}
+		return nil
+	case "PointInTime":
+		if cr.Spec.ForProvider.RestoreFrom.Snapshot == nil {
+			return errors.New(errUnknownRestoreSource)
+		}
+
+		res := &svcsdk.RestoreDBClusterToPointInTimeInput{}
+		SetFieldsForCluster(cr, obj, res)
+
+		// set pointintime specific inputs
+		SetIfNonNil(func(i metav1.Time) *svcsdk.RestoreDBClusterToPointInTimeInput {
+			// Need to convert from *metav1.Time to *time.Time
+			t, _ := time.Parse(time.RFC3339, i.Format(time.RFC3339))
+			return res.SetRestoreToTime(t)
+
+		}, cr.Spec.ForProvider.RestoreFrom.PointInTime.RestoreTime)
+
+		SetIfNonNil(res.SetEngineMode, cr.Spec.ForProvider.EngineMode)
+
+		if _, err := client.RestoreDBClusterToPointInTimeWithContext(ctx, res); err != nil {
+			return perrors.Wrap(err, errRestore)
+		}
+		return nil
+	}
+
+	return errors.New(errUnknownRestoreFromSource)
 }

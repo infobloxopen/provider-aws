@@ -1,0 +1,148 @@
+package dbcluster
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/crossplane-contrib/provider-aws/pkg/controller/rds"
+	. "github.com/crossplane-contrib/provider-aws/pkg/controller/rds"
+	. "github.com/crossplane-contrib/provider-aws/pkg/generics"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	svcsdk "github.com/aws/aws-sdk-go/service/rds"
+	svcsdkapi "github.com/aws/aws-sdk-go/service/rds/rdsiface"
+	svcapitypes "github.com/crossplane-contrib/provider-aws/apis/rds/v1alpha1"
+	perrors "github.com/pkg/errors"
+)
+
+func SetCommonFieldsFromClusterCR[T ClusterParameters[T]](cr *svcapitypes.DBCluster, obj *svcsdk.CreateDBClusterInput, input T) error {
+	// SetIfNonNil(input.SetAllocatedStorage, cr.Spec.ForProvider.BacktrackWindow)
+	SetIfNonNil(input.SetBacktrackWindow, cr.Spec.ForProvider.BacktrackWindow)
+	SetIfNonNil(input.SetCopyTagsToSnapshot, cr.Spec.ForProvider.CopyTagsToSnapshot)
+	SetIfNonNil(input.SetDBClusterIdentifier, obj.DBClusterIdentifier)
+	SetIfNonNil(input.SetDBClusterParameterGroupName, cr.Spec.ForProvider.DBClusterParameterGroupName)
+	SetIfNonNil(input.SetDBSubnetGroupName, cr.Spec.ForProvider.DBSubnetGroupName)
+	SetIfNonNil(input.SetDeletionProtection, cr.Spec.ForProvider.DeletionProtection)
+	SetIfNonNil(input.SetDomain, cr.Spec.ForProvider.Domain)
+	SetIfNonNil(input.SetDomainIAMRoleName, cr.Spec.ForProvider.DomainIAMRoleName)
+	SetPointerSliceIfNonNil(input.SetEnableCloudwatchLogsExports, cr.Spec.ForProvider.EnableCloudwatchLogsExports)
+	SetIfNonNil(input.SetEnableIAMDatabaseAuthentication, cr.Spec.ForProvider.EnableIAMDatabaseAuthentication)
+	SetIfNonNil(input.SetKmsKeyId, cr.Spec.ForProvider.KMSKeyID)
+	SetIfNonNil(input.SetOptionGroupName, cr.Spec.ForProvider.OptionGroupName)
+	SetIfNonNil(input.SetPort, cr.Spec.ForProvider.Port)
+	ConvertPointerSlice(cr.Spec.ForProvider.Tags, ToAWSSDKTag)
+	SetPointerSliceIfNonNil(input.SetVpcSecurityGroupIds, obj.VpcSecurityGroupIds)
+	return nil
+}
+
+func SetClusterFields[T ClusterParameters[T]](cr *svcapitypes.DBCluster, obj *svcsdk.CreateDBClusterInput, input T) error {
+	SetCommonFieldsFromClusterCR(cr, obj, input)
+
+	return nil
+}
+
+func SetCommonFieldsFromInstanceCR[T InstanceParameters[T]](cr *svcapitypes.DBInstance, obj *svcsdk.CreateDBInstanceInput, input T) error {
+	SetIfNonNil(input.SetAllocatedStorage, cr.Spec.ForProvider.BacktrackWindow)
+	SetIfNonNil(input.SetAvailabilityZone, cr.Spec.ForProvider.AvailabilityZone)
+	SetIfNonNil(input.SetBacktrackWindow, cr.Spec.ForProvider.BacktrackWindow)
+	SetIfNonNil(input.SetCopyTagsToSnapshot, cr.Spec.ForProvider.CopyTagsToSnapshot)
+	SetIfNonNil(input.SetDBInstanceIdentifier, obj.DBClusterIdentifier)
+	SetIfNonNil(input.SetDBSubnetGroupName, cr.Spec.ForProvider.DBSubnetGroupName)
+	SetIfNonNil(input.SetDeletionProtection, cr.Spec.ForProvider.DeletionProtection)
+	SetIfNonNil(input.SetDomain, cr.Spec.ForProvider.Domain)
+	SetIfNonNil(input.SetDomainIAMRoleName, cr.Spec.ForProvider.DomainIAMRoleName)
+	SetPointerSliceIfNonNil(input.SetEnableCloudwatchLogsExports, cr.Spec.ForProvider.EnableCloudwatchLogsExports)
+	SetIfNonNil(input.SetEnableIAMDatabaseAuthentication, cr.Spec.ForProvider.EnableIAMDatabaseAuthentication)
+	SetIfNonNil(input.SetKmsKeyId, cr.Spec.ForProvider.KMSKeyID)
+	SetIfNonNil(input.SetOptionGroupName, cr.Spec.ForProvider.OptionGroupName)
+	SetIfNonNil(input.SetPort, cr.Spec.ForProvider.Port)
+	ConvertPointerSlice(cr.Spec.ForProvider.Tags, rds.ToAWSSDKTag)
+	SetPointerSliceIfNonNil(input.SetVpcSecurityGroupIds, obj.VpcSecurityGroupIds)
+	return nil
+}
+
+func SetInstanceFields[T InstanceParameters[T]](cr *svcapitypes.DBInstance, obj *svcsdk.CreateDBInstanceInput, input T) error {
+	SetCommonFieldsFromInstanceCR(cr, obj, input)
+
+	return nil
+}
+
+func RestoreDBCluster(ctx context.Context, client svcsdkapi.RDSAPI, cr *svcapitypes.DBCluster, obj *svcsdk.CreateDBClusterInput) error { // nolint:gocyclo
+
+	if cr.Spec.ForProvider.RestoreFrom == nil {
+		return errors.New(errUnknownRestoreSource)
+	}
+	if cr.Spec.ForProvider.RestoreFrom.Source == nil {
+		return errors.New(errUnknownRestoreSource)
+	}
+	switch *cr.Spec.ForProvider.RestoreFrom.Source {
+	case "S3":
+		if cr.Spec.ForProvider.RestoreFrom.S3 == nil {
+			return errors.New(errUnknownRestoreSource)
+		}
+		res := &svcsdk.RestoreDBClusterFromS3Input{}
+		SetFieldsForCluster(cr, obj, res)
+
+		// set s3 specific inputs
+		SetIfNonNil(res.SetS3BucketName, cr.Spec.ForProvider.RestoreFrom.S3.BucketName)
+		SetIfNonNil(res.SetS3IngestionRoleArn, cr.Spec.ForProvider.RestoreFrom.S3.IngestionRoleARN)
+		SetIfNonNil(res.SetS3Prefix, cr.Spec.ForProvider.RestoreFrom.S3.Prefix)
+		SetIfNonNil(res.SetSourceEngine, cr.Spec.ForProvider.RestoreFrom.S3.SourceEngine)
+		SetIfNonNil(res.SetSourceEngineVersion, cr.Spec.ForProvider.RestoreFrom.S3.SourceEngineVersion)
+
+		if _, err := client.RestoreDBClusterFromS3WithContext(ctx, res); err != nil {
+			return perrors.Wrap(err, errRestore)
+		}
+		return nil
+	case "Snapshot":
+		if cr.Spec.ForProvider.RestoreFrom.Snapshot == nil {
+			return errors.New(errUnknownRestoreSource)
+		}
+		res := &svcsdk.RestoreDBClusterFromSnapshotInput{}
+		SetCommonFieldsFromClusterCR(cr, obj, res)
+
+		// set snapshot specific inputs
+		SetIfNonNil(res.SetSnapshotIdentifier, cr.Spec.ForProvider.RestoreFrom.Snapshot.SnapshotIdentifier)
+
+		// set other allowable input fields
+		SetPointerSliceIfNonNil(res.SetAvailabilityZones, cr.Spec.ForProvider.AvailabilityZones)
+		SetIfNonNil(res.SetDatabaseName, cr.Spec.ForProvider.DatabaseName)
+		SetIfNonNil(res.SetEngine, cr.Spec.ForProvider.Engine)
+		SetIfNonNil(res.SetEngineMode, cr.Spec.ForProvider.EngineMode)
+		SetIfNonNil(res.SetEngineVersion, cr.Spec.ForProvider.EngineVersion)
+		SetIfNonNil(res.SetCopyTagsToSnapshot, cr.Spec.ForProvider.CopyTagsToSnapshot)
+
+		if cr.Spec.ForProvider.ScalingConfiguration != nil {
+			var scalingConfiguration *svcsdk.ScalingConfiguration
+			scalingConfiguration.AutoPause = cr.Spec.ForProvider.ScalingConfiguration.AutoPause
+			scalingConfiguration.MaxCapacity = cr.Spec.ForProvider.ScalingConfiguration.MaxCapacity
+			scalingConfiguration.MinCapacity = cr.Spec.ForProvider.ScalingConfiguration.MinCapacity
+			scalingConfiguration.SecondsBeforeTimeout = cr.Spec.ForProvider.ScalingConfiguration.SecondsBeforeTimeout
+			scalingConfiguration.SecondsUntilAutoPause = cr.Spec.ForProvider.ScalingConfiguration.SecondsUntilAutoPause
+			scalingConfiguration.TimeoutAction = cr.Spec.ForProvider.ScalingConfiguration.TimeoutAction
+			res.SetScalingConfiguration(scalingConfiguration)
+		}
+		return nil
+	case "PointInTime":
+		if cr.Spec.ForProvider.RestoreFrom.Snapshot == nil {
+			return errors.New(errUnknownRestoreSource)
+		}
+
+		res := &svcsdk.RestoreDBClusterToPointInTimeInput{}
+		SetCommonFieldsFromClusterCR(cr, obj, res)
+
+		SetIfNonNil(func(i metav1.Time) *svcsdk.RestoreDBClusterToPointInTimeInput {
+			// Need to convert from *metav1.Time to *time.Time
+			t, _ := time.Parse(time.RFC3339, i.Format(time.RFC3339))
+			return res.SetRestoreToTime(t)
+
+		}, cr.Spec.ForProvider.RestoreFrom.PointInTime.RestoreTime)
+
+		SetIfNonNil(res.SetEngineMode, cr.Spec.ForProvider.EngineMode)
+
+		return nil
+	}
+
+	return errors.New(errUnknownRestoreFromSource)
+}
