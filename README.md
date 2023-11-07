@@ -1,5 +1,41 @@
 # provider-aws
 
+## Instructions for infoblox releases
+
+The packages build from this repo are released on GitHub Package Manager ([ghcr.io/infobloxopen/provider-aws](https://github.com/infobloxopen/provider-aws/pkgs/container/provider-aws)).
+
+The steps to build a new release for upgrading crossplane:
+1. Setup this in local.
+    ```shell
+    $ git clone --recursive git@github.com:infobloxopen/provider-aws.git
+    $ cd provider-aws
+    $ git remote add upstream git@github.com:crossplane-contrib/provider-aws.git
+    ```
+2. Now fetch the release branch from upstream and checkout to that branch. Now using this as a base branch we will create our patch branch.
+   The convention should be that patch branch should have suffix `-ib`. Eg.
+    ```shell
+    $ git fetch upstream release-0.43
+    $ git checkout release-0.43
+    $ git branch --set-upstream-to=origin/release-0.43
+    $ git push origin release-0.43
+    $ git checkout -b release-0.43-ib
+    ```
+3. On this branch we can add our CI changes to allow us to build the package and publish it to ghcr.io/infobloxopen/provider-aws.
+   The changes required in `.github/workflows` actions are in commit: [fc51fa5](https://github.com/infobloxopen/provider-aws/commit/fc51fa505b58dbe3e540874ba02fc2c855b9af19).
+   To apply these changes to your branch we can simply cherry-pick this commit onto current branch.
+    ```shell
+    $ git cherry-pick fc51fa5
+    $ git push origin release-0.43-ib
+    ```
+4. Now we can work on adding our custom changes as per [change log](https://github.com/infobloxopen/provider-aws/tree/master#infoblox-change-log) and upstream as per requirement.
+5. Once all changes are pushed to `origin/<release-branch>-ib`, we can build the package with github action `ci.yaml` of this branch.
+   The CI action expects a version for package to build and publish. Convention is to keep it in semver format of `vx.x.x-ib`. This publishes the package to ghcr.
+6. Now we can open a DCPR with this version specified in `crossplane-provider-values.yaml` in the key `.Values.package.version`.
+
+### Infoblox change log
+
+1. [update rds/dbinstance to update tags if modified](https://github.com/crossplane-contrib/provider-aws/commit/55414ad7679ef2627a25a147f58c7eaf0400f101)
+
 ## Overview
 
 This `provider-aws` repository is the Crossplane infrastructure provider for
