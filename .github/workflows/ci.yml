@@ -6,7 +6,11 @@ on:
       - master
       - release-*
   pull_request: {}
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v0.1.0)'
+        required: false
 
 env:
   # Common versions
@@ -14,12 +18,7 @@ env:
   GOLANGCI_VERSION: 'v1.54.2'
   DOCKER_BUILDX_VERSION: 'v0.10.0'
 
-  # Common users. We can't run a step 'if secrets.AWS_USR != ""' but we can run
-  # a step 'if env.AWS_USR' != ""', so we copy these to succinctly test whether
-  # credentials have been provided before trying to run steps that need them.
-  CONTRIB_DOCKER_USR: ${{ secrets.CONTRIB_DOCKER_USR }}
-  XPKG_ACCESS_ID: ${{ secrets.XPKG_ACCESS_ID }}
-  AWS_USR: ${{ secrets.AWS_USR }}
+  DOCKER_USR: ${{ github.actor }}
 
 jobs:
   check-diff:
@@ -193,7 +192,7 @@ jobs:
   trivy-scan-fs:
     runs-on: ubuntu-22.04
     needs: detect-noop
-    if: needs.detect-noop.outputs.noop != 'true'
+    if: needs.detect-noop.outputs.noop != 'true' && github.ref == 'refs/heads/master'
     steps:
       - name: Checkout
         uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608 # v4
@@ -381,12 +380,24 @@ jobs:
       - name: Vendor Dependencies
         run: make vendor vendor.check
 
-      - name: Build Artifacts
-        run: make -j2 build.all
+      - name: Build Artifacts with Version
+        run: make -j2 build.all VERSION=${XPKG_VERSION}
+        if: env.XPKG_VERSION != ''
         env:
           # We're using docker buildx, which doesn't actually load the images it
           # builds by default. Specifying --load does so.
           BUILD_ARGS: "--load"
+          XPKG_VERSION: ${{ github.event.inputs.version }}
+
+      - name: Build Artifacts without Version
+        run: make -j2 build.all
+        if: env.XPKG_VERSION == ''
+        env:
+          # We're using docker buildx, which doesn't actually load the images it
+          # builds by default. Specifying --load does so.
+          BUILD_ARGS: "--load"
+          XPKG_VERSION: ${{ github.event.inputs.version }}
+
 
       - name: Publish Artifacts to GitHub
         uses: actions/upload-artifact@a8a3f3ad30e3422c9c7b888a15615d19a852ae32 # v3
@@ -394,36 +405,31 @@ jobs:
           name: output
           path: _output/**
 
-      - name: Login to DockerHub
+      - name: Login to GHCR
         uses: docker/login-action@343f7c4344506bcbf9b4de18042ae17996df046d # v3
-        if: env.CONTRIB_DOCKER_USR != ''
+        if: env.DOCKER_USR != ''
         with:
-          username: ${{ secrets.CONTRIB_DOCKER_USR }}
-          password: ${{ secrets.CONTRIB_DOCKER_PSW }}
+          registry: ghcr.io
+          username: ${{ env.DOCKER_USR }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to Upbound
-        uses: docker/login-action@343f7c4344506bcbf9b4de18042ae17996df046d # v3
-        if: env.XPKG_ACCESS_ID != ''
-        with:
-          registry: xpkg.upbound.io
-          username: ${{ secrets.XPKG_ACCESS_ID }}
-          password: ${{ secrets.XPKG_TOKEN }}
-
-      - name: Publish Artifacts to S3, Marketplace, DockerHub
-        run: make -j2 publish BRANCH_NAME=${GITHUB_REF##*/}
-        if: env.AWS_USR != '' && env.CONTRIB_DOCKER_USR != ''
+      - name: Publish Artifacts to GHCR with Version
+        run: make -j2 publish BRANCH_NAME=${GITHUB_REF##*/} VERSION=${XPKG_VERSION}
+        if: env.DOCKER_USR != '' && env.XPKG_VERSION != ''
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_USR }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_PSW }}
-          AWS_DEFAULT_REGION: us-east-1
           GIT_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          XPKG_VERSION: ${{ github.event.inputs.version }}
 
-      - name: Promote Artifacts in S3, DockerHub
-        if: github.ref == 'refs/heads/master' && env.AWS_USR != '' && env.CONTRIB_DOCKER_USR != ''
+      - name: Publish Artifacts to GHCR without Version
+        run: make -j2 publish BRANCH_NAME=${GITHUB_REF##*/}
+        if: env.DOCKER_USR != '' && env.XPKG_VERSION == ''
+        env:
+          GIT_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          XPKG_VERSION: ${{ github.event.inputs.version }}
+
+      - name: Promote Artifacts in Docker Hub
+        if: github.ref == 'refs/heads/master' && env.DOCKER_USR != ''
         run: make -j2 promote
         env:
           BRANCH_NAME: master
           CHANNEL: master
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_USR }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_PSW }}
-          AWS_DEFAULT_REGION: us-east-1

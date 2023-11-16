@@ -31,6 +31,7 @@ import (
 	aws "github.com/crossplane-contrib/provider-aws/pkg/clients"
 	dbinstance "github.com/crossplane-contrib/provider-aws/pkg/clients/rds"
 	"github.com/crossplane-contrib/provider-aws/pkg/controller/rds/utils"
+	svcutils "github.com/crossplane-contrib/provider-aws/pkg/controller/rds/utils"
 	"github.com/crossplane-contrib/provider-aws/pkg/features"
 )
 
@@ -423,7 +424,6 @@ func lateInitialize(in *svcapitypes.DBInstanceParameters, out *svcsdk.DescribeDB
 
 func (e *custom) isUpToDate(ctx context.Context, cr *svcapitypes.DBInstance, out *svcsdk.DescribeDBInstancesOutput) (upToDate bool, diff string, err error) { //nolint:gocyclo
 	db := out.DBInstances[0]
-
 	patch, err := createPatch(out, &cr.Spec.ForProvider)
 	if err != nil {
 		return false, "", err
@@ -506,11 +506,15 @@ func (e *custom) isUpToDate(ctx context.Context, cr *svcapitypes.DBInstance, out
 	}
 	if tagsChanged {
 		diff += fmt.Sprintf("\nadd %d tag(s) and remove %d tag(s)", len(e.cache.addTags), len(e.cache.removeTags))
+		err = svcutils.UpdateTagsForResource(ctx, e.client, cr.Spec.ForProvider.Tags, cr.Status.AtProvider.DBInstanceARN)
+		if err != nil {
+			log.Printf("Failed to update tags. [ERROR]: %v", aws.Wrap(err, errDescribe))
+		}
 	}
 
 	log.Println(diff)
 
-	return false, diff, nil
+	return false, diff, err
 }
 
 func isEngineVersionUpToDate(cr *svcapitypes.DBInstance, out *svcsdk.DescribeDBInstancesOutput) bool {
